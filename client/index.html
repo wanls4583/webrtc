@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>webrtc</title>
+	<script src="./adapter-latest.js"></script>
+</head>
+
+<body>
+	<button onclick="doOffer()">加入会议</button>
+	<div id="videos">
+		<video id="localVideo" autoplay muted playsinline>本地窗口</video>
+		<video id="remoteVideo" autoplay playsinline>远端窗口</video>
+	</div>
+	<script>
+		var DO_OFFER = 1;
+		var DO_ANSWER = 2;
+		var SET_DESC = 3;
+		var ICE_CANDIDATE = 4;
+		var localVideo = document.querySelector('#localVideo');
+		var remoteVideo = document.querySelector('#remoteVideo');
+		var zeroRTCEngine = null;
+		var localStream = null;
+		var remoteStream = null;
+		var candidate = null;
+		var offerSession = null;
+		var answerSession = null;
+
+		class ZeroRTCEngine {
+			constructor(wsUrl) {
+				this.wsUrl = wsUrl;
+				this.signaling = null;
+				this.createWebsocket();
+			}
+			createWebsocket() {
+				this.signaling = new WebSocket(this.wsUrl);
+
+				this.signaling.onopen = function() {
+					console.log("websocket open");
+				}
+
+				this.signaling.onmessage = function(event) {
+					var message = event.data;
+					message = JSON.parse(message);
+					console.log('message:', message.type);
+					switch (message.type) {
+						case DO_ANSWER:
+							doAnswer(message.data);
+							break;
+						case ICE_CANDIDATE:
+							addIceCandidate(message.data);
+							break;
+						case SET_DESC:
+							setRemoteDescription(message.data);
+					}
+				}
+
+				this.signaling.onerror = function(event) {
+					console.log("onError: " + event.data);
+				}
+
+				this.signaling.onclose = function(event) {
+					console.log("onClose -> code: " + event.code + ", reason:" + EventTarget.reason);
+				}
+			}
+			sendMessage(message) {
+				this.signaling.send(message);
+			}
+		}
+		
+		init();
+
+		function init() {
+			zeroRTCEngine = new ZeroRTCEngine('ws://127.0.0.1:8081/');
+			navigator.mediaDevices.getUserMedia({
+					audio: true,
+					video: true
+				})
+				.then((stream) => {
+					localVideo.srcObject = stream;
+					localStream = stream;
+					createPeerConnection();
+				})
+				.catch(function(e) {
+					alert("getUserMedia() error: " + e.name);
+				});
+		}
+
+		function createPeerConnection() {
+			var defaultConfiguration = {
+				bundlePolicy: "max-bundle",
+				rtcpMuxPolicy: "require",
+				iceTransportPolicy: "all", 
+				//iceTransportPolicy: "relay", 
+				// 修改ice数组测试效果，需要进行封装
+				iceServers: [{
+						"urls": [
+							"turn:bwg.lisong.hn.cn:3478?transport=udp",
+							"turn:bwg.lisong.hn.cn:3478?transport=tcp" // 可以插入多个进行备选
+						],
+						"username": "test",
+						"credential": "123456"
+					},
+					{
+						"urls": [
+							"stun:bwg.lisong.hn.cn:3478"
+						]
+					}
+				]
+			};
+
+			pc = new RTCPeerConnection(defaultConfiguration); // 音视频通话的核心类
+			pc.onicecandidate = (event) => {
+				console.info("onicecandidate");
+				if (event.candidate) {
+					candidate = {
+						'sdpMLineIndex': event.candidate.sdpMLineIndex,
+						'sdpMid': event.candidate.sdpMid,
+						'candidate': event.candidate.candidate
+					};
+					zeroRTCEngine.sendMessage(JSON.stringify({
+						type: ICE_CANDIDATE,
+						data: candidate
+					}));
+				} else {
+					console.warn("End of candidates");
+				}
+			};
+			pc.ontrack = (event) => {
+				console.log('ontrack')
+				remoteStream = event.streams[0];
+				remoteVideo.srcObject = remoteStream;
+			};
+			pc.onconnectionstatechange = () => {
+				if (pc != null) {
+					console.info("ConnectionState -> " + pc.connectionState);
+				}
+			};
+			pc.oniceconnectionstatechange = () => {
+				if (pc != null) {
+					console.info("IceConnectionState -> " + pc.iceConnectionState);
+				}
+			}
+
+			localStream.getTracks().forEach((track) => pc.addTrack(track, localStream)); // 把本地流设置给RTCPeerConnection
+		}
+
+		function doOffer() {
+			if (pc == null) {
+				createPeerConnection();
+			}
+			pc.createOffer().then((session) => {
+				pc.setLocalDescription(session)
+					.then(function() {
+						offerSession = session;
+						zeroRTCEngine.sendMessage(JSON.stringify({
+							type: DO_OFFER,
+							data: session
+						}));
+					})
+					.catch(function(error) {
+						console.error("offer setLocalDescription failed: " + error);
+					});
+
+			});
+		}
+
+		function doAnswer(session) {
+			setRemoteDescription(session);
+			pc.createAnswer().then((session) => {
+				pc.setLocalDescription(session)
+					.then(function() {
+						answerSession = session;
+						zeroRTCEngine.sendMessage(JSON.stringify({
+							type: DO_ANSWER,
+							data: session
+						}));
+					})
+					.catch(function(error) {
+						console.error("answer setLocalDescription failed: " + error);
+					});
+
+			});
+		}
+
+		function addIceCandidate(candidate) {
+			console.log('addIceCandidate');
+			candidate = new RTCIceCandidate(candidate);
+			pc.addIceCandidate(candidate).catch(e => {
+				console.error("addIceCandidate failed:" + e.name);
+			});
+		}
+
+		function setRemoteDescription(session) {
+			console.log('setRemoteDescription');
+			pc.setRemoteDescription(session);
+		}
+	</script>
+</body>
+
+</html>
